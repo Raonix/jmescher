@@ -40,6 +40,8 @@ import javax.swing.JOptionPane;
 import javax.vecmath.Point2d;
 import javax.vecmath.Point3d;
 import javax.vecmath.Vector2d;
+import org.apfloat.Apfloat;
+import org.apfloat.ApfloatRuntimeException;
 
 /**
  * Represents a 2D triangulation using points (vertices) and halfedges.
@@ -96,6 +98,9 @@ public class Mesh
 
     // epsilon squared (i.e. for use in squared distance comparisons)
     public final double epsilon;
+
+    // floating point filter for robustness
+    private final double floatingPointFilter;
     
     // the mesh data
     protected LinkedList<Point> points = new LinkedList();
@@ -122,6 +127,43 @@ public class Mesh
     {
         this.epsilon = epsilon;
         if (DEBUG) debugObjects = new HashSet();
+        floatingPointFilter = initFloatingPointFilter();
+    }
+
+    /*
+     * Initializes the floating point filter, the threshold at which orientation
+     * calculations become unreliable and the orientation predicate
+     * has to resort to exact arithmetic.
+     *
+     * This routine is adapted from Jonathan Shewchuk's predicates.c
+     * initexact() routine.
+     *
+     */
+    double initFloatingPointFilter()
+    {
+        double half, e, splitter, check, lastcheck;
+        boolean every_other;
+
+        every_other = true;
+        half = 0.5;
+        e = 1.0;
+        splitter = 1.0;
+        check = 1.0;
+        /* Repeatedly divide `epsilon' by two until it is too small to add to    */
+        /*   one without causing roundoff.  (Also check if the sum is equal to   */
+        /*   the previous sum, for machines that round up instead of using exact */
+        /*   rounding.  Not that this library will work on such machines anyway. */
+        do {
+            lastcheck = check;
+            e *= half;
+            if (every_other) {
+                splitter *= 2.0;
+            }
+            every_other = !every_other;
+            check = 1.0 + e;
+        } while ((check != 1.0) && (check != lastcheck));
+        splitter += 1.0;
+        return (3.0 + 16.0 * e) * e;
     }
     
 /******************************************************************************/
@@ -1761,10 +1803,105 @@ public class Mesh
         }
         return false;
     }
-    
-    // returns positive if ray a->b must turn counter-clockwise
-    // to intersect c
+
+    /*
+     * Orientation predicate that returns positive if ray a->b must
+     * turn counter-clockwise to intersect vertex c.
+     *
+     * Adapted from Jonathan Shewchuk's predicates.c orient2d() routine.
+     * This implementation uses only a single-level floating-point filter,
+     * rather than a fully adaptive (and hence more efficient) method.
+     * 
+     */
     public final double orient(
+            Point2d pa,
+            Point2d pb,
+            Point2d pc)
+    {
+        double detleft, detright, det;
+        double detsum, errbound;
+
+        detleft = (pa.x - pc.x) * (pb.y - pc.y);
+        detright = (pa.y - pc.y) * (pb.x - pc.x);
+        det = detleft - detright;
+
+        if (detleft > 0.0) {
+            if (detright <= 0.0) {
+                return det;
+            } else {
+                detsum = detleft + detright;
+            }
+        } else if (detleft < 0.0) {
+            if (detright >= 0.0) {
+                return det;
+            } else {
+                detsum = -detleft - detright;
+            }
+        } else {
+            return det;
+        }
+
+        errbound = floatingPointFilter * detsum;
+        if ((det >= errbound) || (-det >= errbound)) {
+            return det;
+        }
+        if (MESSAGES) message("orient = %g\n", det);
+
+        /* resort to exact arithmetic */
+        return orientExact(pa,pb,pc);
+    }
+
+    /*
+     * Orientation predicate that returns positive if ray a->b must
+     * turn counter-clockwise to intersect vertex c.
+     *
+     * Exact calculation using the Apfloat arbitrary precision library.
+     *
+     */
+    public final double orientExact(
+            Point2d pa,
+            Point2d pb,
+            Point2d pc)
+    {
+        /*
+         * detleft = (pa.x - pc.x) * (pb.y - pc.y);
+         * detright = (pa.y - pc.y) * (pb.x - pc.x);
+         * det = detleft - detright;
+         */
+        Apfloat ax,ay,bx,by,cx,cy;
+        Apfloat acx,bcx,acy,bcy;
+        Apfloat detleft,detright,det;
+
+        det = Apfloat.ZERO;
+
+        try {
+            ax = new Apfloat(pa.x);
+            ay = new Apfloat(pa.y);
+            bx = new Apfloat(pb.x);
+            by = new Apfloat(pb.y);
+            cx = new Apfloat(pc.x);
+            cy = new Apfloat(pc.y);
+
+            acx = org.apfloat.ApfloatMath.sum(ax,cx.negate());
+            bcx = org.apfloat.ApfloatMath.sum(bx,cx.negate());
+            acy = org.apfloat.ApfloatMath.sum(ay,cy.negate());
+            bcy = org.apfloat.ApfloatMath.sum(by,cy.negate());
+
+            detleft = org.apfloat.ApfloatMath.product(acx,bcy);
+            detright = org.apfloat.ApfloatMath.product(acy,bcx);
+
+            det = org.apfloat.ApfloatMath.sum(detleft,detright.negate());
+        } catch (ApfloatRuntimeException e) {
+            System.err.println("Unable to complete exact orient calculation!");
+            System.err.println(e.getMessage());
+        }
+        if (MESSAGES) message("orientExact = %g\n", det.doubleValue());
+        
+        return (double)det.compareTo(Apfloat.ZERO);
+    }
+
+    // non-robust version
+    public final double orientNonRobust(
             Point2d a,
             Point2d b,
             Point2d c)
