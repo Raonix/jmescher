@@ -337,6 +337,25 @@ public class Mesh
                 halfEdges.indexOf(he2));
         return he1;
     }
+
+    /*
+     * Adds an edge from the origin of he1 to the origin of he2.
+     */
+    private HalfEdge addEdge(
+            HalfEdge he1,
+            HalfEdge he2,
+            HalfEdge he1prev,
+            HalfEdge he2prev)
+    {
+        HalfEdge heAdd = addHalfEdge(he1.origin,he2.origin);
+        delaunayQueue.add(heAdd);
+        heAdd.next = he2;
+        he1prev.next = heAdd;
+        heAdd.sibling.next = he1;
+        he2prev.next = heAdd.sibling;
+        if (TEST) test();
+        return heAdd;
+    }
     
     public Point addBoundaryPoint(Point p, HalfEdge he0)
     {
@@ -743,72 +762,44 @@ public class Mesh
             
     private void fillPolygonRecurse(ArrayList<HalfEdge> polygon)
     {
-        int n,s;
-        Point p0,p1,p2;
-        HalfEdge heTest0,heTest1,heAdd;
+        int s,c;
+        Point pa,pb,pc;
+        HalfEdge heAdd;
         
-        // Assumes a Jordan (simple) polygon with n>3 sides!
-        // (i.e. no sides intersect)
         if (MESSAGES) message(
                 "Filling polygon with %d sides.",
                 polygon.size());
         if (DEBUG) debugView(polygon.get(0),"fillPolygon: start");
         s = polygon.size();
         if (s > 3) {
-            // A Jordan polygon always has two non-overlapping ears.
-            // We iterate over all possible ear edges,
-            // i.e. those between vertices i and i+2 in the polygon
-            p0 = p1 = p2 = null;
-            heTest0 = null;
-            n = 0;
-            edgeWalk:
-            for (int i=0; i<s; i++) {
-                n = i;
-                heTest0 = polygon.get(i);
-                p0 = heTest0.origin;
-                p1 = heTest0.next.origin;
-                p2 = polygon.get((i+2)%s).origin;
-                // check that the ear edge p0->p2 lies strictly
-                // inside the polygon, i.e. to the left of p0->p1
-                if ( orient(p0,p1,p2) > 0 && (! between(p0,p2,p1)) ) {
-                    // check for intersections or points that lie too
-                    // close to the ear edge
-                    heTest1 = heTest0.next.next;
-                    for (int j=0; j<(s-3); j++) {
-                        if (intersectProper(
-                                p0,
-                                p2,
-                                heTest1.origin,
-                                heTest1.next.origin)
-                            ||
-                            between(
-                                p0,
-                                p2,
-                                heTest1.next.origin
-                            ))
-                        {
-                            continue edgeWalk;
-                        }
-                        heTest1 = heTest1.next;
-                    }
-                    break;
+            pa = polygon.get(0).origin;
+            pb = polygon.get(1).origin;
+            pc = polygon.get(2).origin;
+            c = 2;
+            for (int i=3; i<s; i++) {
+                Point p = polygon.get(i).origin;
+                if (incircle(pa,pb,pc,p) > 0) {
+                    pc = p;
+                    c = i;
                 }
             }
-            heAdd = addHalfEdge(p0,p2);
-            delaunayQueue.add(heAdd);
-            // link halfedges in the ear
-            heAdd.sibling.next = heTest0;
-            polygon.get((n+1)%s).next = heAdd.sibling;
-            // link halfedges in the remaining polygon of size s-1
-            heAdd.next = polygon.get((n+2)%s);
-            polygon.get((n+s-1)%s).next = heAdd;
-            if (s > 4) {
-                ArrayList<HalfEdge> polygon0 = new ArrayList();
-                for (int j=0; j<(s-1); j++) {
-                    polygon0.add(heAdd);
-                    heAdd = heAdd.next;
-                }
-                fillPolygonRecurse(polygon0);
+            /* add edge pa -> pc */
+            if (c < (s-1)) {
+                heAdd = addEdge(
+                        polygon.get(0),
+                        polygon.get(c),
+                        polygon.get(s-1),
+                        polygon.get(c-1));
+                fillPolygon(heAdd);
+            }
+            /* add edge pb -> pc */
+            if (c > 2) {
+                heAdd = addEdge(
+                        polygon.get(1),
+                        polygon.get(c),
+                        polygon.get(0),
+                        polygon.get(c));
+                fillPolygon(heAdd);
             }
         }
         if (TEST) test();
