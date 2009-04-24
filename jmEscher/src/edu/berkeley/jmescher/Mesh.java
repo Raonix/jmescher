@@ -61,15 +61,16 @@ import org.apfloat.ApfloatRuntimeException;
  */
 public class Mesh
 {    
-    // drawing options
+    /* drawing options */
     protected final static boolean DRAW_PT_FULL = true;
     protected final static boolean DRAW_PT_INDICES = false;
     protected final static boolean DRAW_HE_INDICES = false;
     protected final static boolean DRAW_HALFEDGES = false;
 
+    /* typical size of polygons, for initializing ArrayLists */
     private final static int TYPICAL_POLYGON_SIZE = 16;
 
-    // errors
+    /* errors */
     protected final static String E_EXHAUSTED =
             "Exhausted halfedges or points!";
     protected final static String E_MISSING =
@@ -82,13 +83,15 @@ public class Mesh
             "Incorrect type!";
     protected final static String E_POLYGON =
             "Illegal polygonal region!";
+    protected final static String E_HALFEDGE =
+            "Mismatched halfedge!";
 
-    // stdout/debug/test flags
+    /* stdout/debug/test flags */
     public final static boolean MESSAGES = false;
     public final static boolean DEBUG = true;
     public final static boolean TEST = false;
 
-    // debug
+    /* debug */
     public boolean toggleDebugVisual = false;
     public boolean toggleDebugInteractive = false;
     public boolean toggleDebugSuspend = false;
@@ -96,24 +99,24 @@ public class Mesh
     protected JFrame debugFrame = null;
     private boolean testing = false;
 
-    // epsilon squared (i.e. for use in squared distance comparisons)
+    /* epsilon squared (i.e. for use in squared distance comparisons) */
     public final double epsilon;
 
-    // floating point filter for robustness
+    /* floating point filter for robust predicates */
     private final double floatingPointFilter;
     
-    // the mesh data
+    /* mesh data */
     protected LinkedList<Point> points = new LinkedList();
     protected LinkedList<HalfEdge> halfEdges = new LinkedList();
     protected int nBoundary;
     
-    // queues
+    /* queues */
     protected LinkedList<HalfEdge> delaunayQueue = new LinkedList();
     protected LinkedList<Point> removedConstraints = new LinkedList();
     protected LinkedList<Point> deleteQueue = new LinkedList();
     private Point removeConstraintPeg = null;
     
-    // name and colors
+    /* name and colors */
     protected String name = new String("(unnamed mesh)");
     protected Color highlightColor = Color.RED;
     protected Color warnColor = new Color(255,240,240);
@@ -138,6 +141,7 @@ public class Mesh
      * This routine is adapted from Jonathan Shewchuk's predicates.c
      * initexact() routine.
      *
+     * @return
      */
     double initFloatingPointFilter()
     {
@@ -319,7 +323,7 @@ public class Mesh
         for (int i=0; i<s; i++) {
             polygon.add(halfEdges.get(s-1-i));
         }
-        fillPolygon(polygon);
+        fillGeneralPolygon(polygon);
         delaunayQueue.addAll(polygon);
         updateDelaunay();
     }
@@ -339,7 +343,7 @@ public class Mesh
     }
 
     /*
-     * Adds an edge from the origin of he1 to the origin of he2.
+     * Adds an edge connecting the origins of he1 and he2.
      */
     private HalfEdge addEdge(
             HalfEdge he1,
@@ -347,6 +351,9 @@ public class Mesh
             HalfEdge he1prev,
             HalfEdge he2prev)
     {
+        assert he1prev.next == he1 : error(E_HALFEDGE);
+        assert he2prev.next == he2 : error(E_HALFEDGE);
+
         HalfEdge heAdd = addHalfEdge(he1.origin,he2.origin);
         delaunayQueue.add(heAdd);
         heAdd.next = he2;
@@ -364,7 +371,8 @@ public class Mesh
                 error("Adding boundary point that doesn't lie on boundary!");
         
         HalfEdge he1,he2,he3;
-        
+
+        /* check for coincidence with the endpoints of he0 */
         if (coincident(p,he0.origin)) {
             if (MESSAGES) message(
                     "Boundary point is within epsilon of %d.",
@@ -377,46 +385,18 @@ public class Mesh
                     points.indexOf(he0.next.origin));
             return he0.next.origin;
         }
-        // add the new point
         points.add(p);
         if (MESSAGES) message("Adding boundary point %d.",points.indexOf(p));
-        // locate halfedges
         he2 = he0.next;
         he3 = he2.next;
-        // split the boundary
+        /* split the existing boundary */
         he1 = new HalfEdge(p,HalfEdge.BOUNDARY);
         halfEdges.add(he1);
-        // link halfedges
+        /* link halfedges */
         p.he = he1;
         he0.next = he1;
         he1.next = he2;
-        // check whether the new boundary point is within the epsilon
-        // neighborhood of the point opposite it
-        if (    between(he0.origin,he1.origin,he3.origin)
-             || between(he1.origin,he2.origin,he3.origin))
-        {
-            if (he3.origin.isType(Point.BOUNDARY)) {
-                if (DEBUG) debugView(p,
-                        "addBoundaryPoint: opposite point too close");
-                return null;
-            } else {
-                removePoint(he3.origin);
-            }
-        }
-        else if (   between(he0.origin,he2.origin,he1.origin)
-                 || between(he1.origin,he3.origin,he2.origin))
-        {
-            if (! he2.isType(HalfEdge.BOUNDARY)) {
-                removeEdge(he2);
-            } else if (! he3.isType(HalfEdge.BOUNDARY)) {
-                removeEdge(he3);
-            } else {
-                if (DEBUG) debugView(p,
-                        "addBoundaryPoint: no possible diagonal");
-                return null;
-            }
-        }
-        fillPolygon(he0);
+        fillQuadrilateral(he0);
         updateDelaunay();
         nBoundary++;
         if (TEST) test();
@@ -427,13 +407,14 @@ public class Mesh
     {
         double dist,min;
         Point pNearest = null;
-        HalfEdge heTest;
+        FaceWalk walk;
         
         if (DEBUG) debugView(p,"addInteriorPoint: p");
-        // find the closest point to p
+        /* find the closest point to p */
         min = Double.MAX_VALUE;
         for (Point pTest : points) {
             dist = p.distanceSquared(pTest);
+            /* abort if the point is within epsilon of an existing point */
             if (dist < epsilon) {
                 if (MESSAGES) message(
                         "Point is within epsilon of %d.",
@@ -447,133 +428,299 @@ public class Mesh
         }
         if (MESSAGES) message("Closest point is ",points.indexOf(pNearest));
         if (DEBUG) debugView(pNearest,"addInteriorPoint: closest point");
-        // find face containing p, starting at pNearest
-        heTest = findFace(pNearest.he,p);
+        /* find face containing p, starting at pNearest */
+        walk = findFace(pNearest.he,p);
         if (MESSAGES) message(
                 "Point is within face with halfedge %d.",
-                halfEdges.indexOf(heTest));
-        // check that this point isn't too close to an existing point
-        /*for (int i=0; i<3; i++) {
-            if (coincident(p,heTest.origin)) {
-                message("Point is within epsilon of %d.",
-                        points.indexOf(heTest.origin));
-                return heTest.origin;
-            }
-            heTest = heTest.next;
-        }*/
-        // check that this point isn't too close to an existing edge
-        // in the containing face
-        for (int i=0; i<3; i++) {
-            Point p1 = heTest.origin;
-            Point p2 = heTest.next.origin;
-            if (betweenProper(p1,p2,p)) {
-                if (MESSAGES) message("addInteriorPoint: snapping to edge");
-                // test whether point lies on a sliver triangle and
-                // is within epsilon of a nearby edge
-                HalfEdge he1 = heTest.next;
-                HalfEdge he2 = heTest.next.next;
-                boolean b1 = between(he1.origin,he2.origin,p);
-                boolean b2 = between(he2.origin,heTest.origin,p);
-                if (b1 || b2) {
-                    if (b1 && he1.isType(HalfEdge.AUXILARY)) {
-                        removeEdge(he1);
-                    } else if (b2 && he2.isType(HalfEdge.AUXILARY)) {
-                        removeEdge(he2);
-                    } else {
-                        if (DEBUG) debugView(pNearest,
-                                "addInteriorPoint: sliver triangle");
-                        return pNearest;
-                }
-                }
-                he1 = heTest.sibling.next;
-                he2 = heTest.sibling.next.next;
-                b1 = between(he1.origin,he2.origin,p);
-                b2 = between(he2.origin,heTest.sibling.origin,p);
-                if (b1 || b2) {
-                    if (b1 && he1.isType(HalfEdge.AUXILARY)) {
-                        removeEdge(he1);
-                    } else if (b2 && he2.isType(HalfEdge.AUXILARY)) {
-                        removeEdge(he2);
-                    } else {
-                        if (DEBUG) debugView(pNearest,
-                                "addInteriorPoint: adjacent sliver triangle");
-                        return pNearest;
-                    }
-                }
-                // add the point
-                points.add(p);
-                //addInteriorSnapPoint(p,heTest);
-                HalfEdge heAdd = addHalfEdge(p,heTest.next.origin);
-                heAdd.setType(heTest.type);
-                heAdd.next = heTest.next;
-                heTest.next = heAdd;
-                findPrevious(heTest.sibling).next = heAdd.sibling;
-                heAdd.sibling.next = heTest.sibling;
-                p.he = heAdd;
-                heTest.sibling.origin = p;
-                updateHalfEdge(heAdd.sibling);
-                fillPolygon(heTest);
-                fillPolygon(heTest.sibling);
-                updateDelaunay();
-                return p;
-            }
-            heTest = heTest.next;
-        }
-        if (DEBUG) debugView(heTest,"addInteriorPoint: inside face");
-        // add the point
+                halfEdges.indexOf(walk.he));
         points.add(p);
-        addInteriorFacePoint(p,heTest);
+        if (walk.status == FaceWalk.COINCIDENT) splitEdge(p,walk.he);
+        else splitFace(p,walk.he);
         updateDelaunay();
         return p;
     }
     
-    private void addInteriorFacePoint(Point p, HalfEdge he1)
+    public boolean addConstraint(Point pStart, Point pEnd)
     {
-        assert halfEdges.contains(he1) : error(E_MISSING);
+        assert points.contains(pStart) : error(E_MISSING);
+        assert points.contains(pEnd) : error(E_MISSING);
+        assert pStart != pEnd : error("Identical points!");
+        assert ! coincident(pStart,pEnd) : error("Coincident points!");
 
-        HalfEdge he2,he3;
-        HalfEdge heAdd1,heAdd2,heAdd3;
-        
-        if (MESSAGES) message("Adding interior point inside face.");
-        // split the face into 3 new faces
-        he2 = he1.next;
-        he3 = he2.next;
-        // add new halfedges
-        heAdd1 = addHalfEdge(p,he1.origin);
-        heAdd2 = addHalfEdge(p,he2.origin);
-        heAdd3 = addHalfEdge(p,he3.origin);
-        // link half edges
-        p.he = heAdd1;
-        heAdd1.next = he1;
-        heAdd2.next = he2;
-        heAdd3.next = he3;
-        he1.next = heAdd2.sibling;
-        he2.next = heAdd3.sibling;
-        he3.next = heAdd1.sibling;
-        heAdd1.sibling.next = heAdd3;
-        heAdd3.sibling.next = heAdd2;
-        heAdd2.sibling.next = heAdd1;
-        // add halfedges to delaunay test
-        delaunayQueue.add(heAdd1);
-        delaunayQueue.add(heAdd2);
-        delaunayQueue.add(heAdd3);
-        delaunayQueue.add(he1);
-        delaunayQueue.add(he2);
-        delaunayQueue.add(he3);
+        int i;
+        Point pSearch0,pSearch1;
+        HalfEdge heSearch,heStart,heStartPrev;
+        FaceWalk walk;
+
+        if (MESSAGES) message(
+                "Constraining %d -> %d.",
+                points.indexOf(pStart),
+                points.indexOf(pEnd));
+        /* find the halfedge at pStart that lies on or below the constraint */
+        walk = startFaceWalk(pStart,pEnd);
+        /* check for trivial condition where the edge already exists */
+        if (walk.status == FaceWalk.COINCIDENT) {
+            return constrainEdge(walk.he);
+        }
+        /* clear edges that intersect the constraint */
+        heStart = walk.he;
+        heStartPrev = findPrevious(heStart);
+        heSearch = heStart.next;
+        for (i=0; i<=halfEdges.size(); i++) {            
+            pSearch0 = heSearch.origin;
+            pSearch1 = heSearch.next.origin;
+            if (DEBUG) debugView(heSearch,"addConstraint: walking");
+            /* check for termination */
+            if (pSearch1 == pEnd) {
+                if (MESSAGES) message(
+                        "Found constraint end at halfedge %d.",
+                        halfEdges.indexOf(heSearch));
+                break;
+            }
+            assert ! coincident(pSearch1,pStart) :
+                    error(E_COINCIDENT,pSearch1,pStart);
+            assert ! coincident(pSearch1,pEnd) :
+                    error(E_COINCIDENT,pSearch1,pEnd);
+            /* check for collinearity */
+            if (between(pStart,pEnd,pSearch1)) {
+                /* split the constraint in two with pSearch1 as the midpoint */
+                addConstraintEdge(heStart,heSearch.next,heStartPrev,heSearch);
+                return addConstraint(pSearch1,pEnd);
+            }
+            /* check for intersection */
+            else if (intersect(pStart,pEnd,pSearch0,pSearch1)) {
+                assert ! heSearch.isType(HalfEdge.BOUNDARY) :
+                        error("Constraint crosses boundary edge!");
+                if (heSearch.isType(HalfEdge.AUXILARY)) {
+                    removeEdge(heSearch);
+                    heSearch = heSearch.sibling;
+                } else if (heSearch.isType(HalfEdge.CONSTRAINT)) {
+                    if (MESSAGES) message(
+                            "Constraint-constraint intersection found.");
+                    Point2d p = intersection(pStart,pEnd,pSearch0,pSearch1);
+                    splitConstraint(heSearch,p);
+                    addConstraintEdge(heStart,heSearch.next,heStartPrev,heSearch);
+                    /* reset the starting point */
+                    heSearch = heSearch.sibling;
+                    heStart = heSearch;
+                    heStartPrev = findPrevious(heStart);
+                    pStart = heSearch.origin;
+                }
+            }
+            heSearch = heSearch.next;
+        } assert i < halfEdges.size() : error(E_EXHAUSTED,pStart,pEnd);
+        addConstraintEdge(heStart,heSearch.next,heStartPrev,heSearch);
+        updateDelaunay();
+        return true;
     }
     
-    // robust for non-triangular regions
-    private void addInteriorSnapPoint(Point p, HalfEdge he)
+    private void addConstraintEdge(
+            HalfEdge he1,
+            HalfEdge he2,
+            HalfEdge he1prev,
+            HalfEdge he2prev)
+    {
+        assert he1prev.next == he1 : error(E_HALFEDGE);
+        assert he2prev.next == he2 : error(E_HALFEDGE);
+
+        HalfEdge heAdd = addEdge(he1,he2,he1prev,he2prev);
+        constrainEdge(heAdd);
+        fillEdgeVisiblePolygon(heAdd);
+        fillEdgeVisiblePolygon(heAdd.sibling);
+    }
+
+/******************************************************************************/
+/* Polygon filling methods
+/******************************************************************************/
+
+    protected void fillQuadrilateral(HalfEdge he1)
+    {
+        HalfEdge he2,he3,he4;
+
+        he2 = he1.next;
+        he3 = he2.next;
+        he4 = he3.next;
+        assert he4.next == he1;
+
+        if (   orient(he1.origin,he3.origin,he2.origin)
+             * orient(he1.origin,he3.origin,he4.origin) < 0)
+        {
+            addEdge(he1,he3,he4,he2);
+        } else {
+            addEdge(he2,he4,he1,he3);
+        }
+    }
+
+    protected ArrayList<HalfEdge> constructPolygon(HalfEdge he)
+    {
+        assert halfEdges.contains(he) : error(E_MISSING);
+
+        int i;
+        HalfEdge heSearch;
+        ArrayList<HalfEdge> polygon = new ArrayList(TYPICAL_POLYGON_SIZE);
+        
+        polygon.add(he);
+        heSearch = he.next;
+        for (i=0; i<=halfEdges.size(); i++) {
+            if (heSearch == he) break;
+            polygon.add(heSearch);
+            if (DEBUG) debugView(heSearch,"fillPolygon: next");
+            heSearch = heSearch.next;
+        } assert i < halfEdges.size() : error(E_EXHAUSTED,he,he.origin);
+
+        return polygon;
+    }
+
+    protected void fillGeneralPolygon(HalfEdge he)
+    {
+        fillGeneralPolygon(constructPolygon(he));
+    }
+
+    protected void fillGeneralPolygon(ArrayList<HalfEdge> polygon)
+    {
+        fillGeneralPolygonRecurse(polygon);
+        delaunayQueue.addAll(polygon);
+    }
+
+    private void fillGeneralPolygonRecurse(ArrayList<HalfEdge> polygon)
+    {
+        assert polygon.size() >= 3 : error("Illegal size!");
+
+        int n,s;
+        Point p0,p1,p2;
+        HalfEdge heTest0,heTest1,heAdd;
+
+        /* Assumes a Jordan (simple) polygon with n>3 sides!
+         * (i.e. no sides intersect) */
+        if (MESSAGES) message(
+                "Filling polygon with %d sides.",
+                polygon.size());
+        if (DEBUG) debugView(polygon.get(0),"fillPolygon: start");
+        s = polygon.size();
+        if (s > 3) {
+            /* A Jordan polygon always has two non-overlapping ears.
+             * We iterate over all possible ear edges,
+             * i.e. those between vertices i and i+2 in the polygon. */
+            p0 = p1 = p2 = null;
+            heTest0 = null;
+            n = 0;
+            edgeWalk:
+            for (int i=0; i<s; i++) {
+                n = i;
+                heTest0 = polygon.get(i);
+                p0 = heTest0.origin;
+                p1 = heTest0.next.origin;
+                p2 = polygon.get((i+2)%s).origin;
+                // check that the ear edge p0->p2 lies strictly
+                // inside the polygon, i.e. to the left of p0->p1
+                if ( orient(p0,p1,p2) > 0 && (! between(p0,p2,p1)) ) {
+                    // check for intersections or points that lie too
+                    // close to the ear edge
+                    heTest1 = heTest0.next.next;
+                    for (int j=0; j<(s-3); j++) {
+                        if (intersectProper(
+                                p0,
+                                p2,
+                                heTest1.origin,
+                                heTest1.next.origin))
+                        {
+                            continue edgeWalk;
+                        }
+                        heTest1 = heTest1.next;
+                    }
+                    break;
+                }
+            }
+            heAdd = addHalfEdge(p0,p2);
+            delaunayQueue.add(heAdd);
+            // link halfedges in the ear
+            heAdd.sibling.next = heTest0;
+            polygon.get((n+1)%s).next = heAdd.sibling;
+            // link halfedges in the remaining polygon of size s-1
+            heAdd.next = polygon.get((n+2)%s);
+            polygon.get((n+s-1)%s).next = heAdd;
+            if (s > 4) {
+                ArrayList<HalfEdge> polygon0 = new ArrayList();
+                for (int j=0; j<(s-1); j++) {
+                    polygon0.add(heAdd);
+                    heAdd = heAdd.next;
+                }
+                fillGeneralPolygonRecurse(polygon0);
+            }
+        }
+        if (TEST) test();
+    }
+
+    protected void fillEdgeVisiblePolygon(HalfEdge he)
+    {
+        ArrayList<HalfEdge> polygon = constructPolygon(he);
+        fillEdgeVisiblePolygonRecurse(polygon);
+        delaunayQueue.addAll(polygon);
+    }
+
+    private void fillEdgeVisiblePolygonRecurse(ArrayList<HalfEdge> polygon)
+    {
+        assert polygon.size() >= 3 : error("Illegal size!");
+
+        int i,c,s;
+        Point pa,pb,pc;
+        HalfEdge heAdd;
+
+        if (MESSAGES) message(
+                "Filling polygon with %d sides.",
+                polygon.size());
+        if (DEBUG) debugView(polygon.get(0),"fillPolygon: start");
+        s = polygon.size();
+        if (s > 3) {
+            pa = polygon.get(0).origin;
+            pb = polygon.get(1).origin;
+            pc = polygon.get(2).origin;
+            c = 2;
+            for (i=3; i<s; i++) {
+                Point p = polygon.get(i).origin;
+                if (incircle(pa,pb,pc,p) > 0) {
+                    pc = p;
+                    c = i;
+                }
+            }
+            /* add edge pa -> pc */
+            if (c < (s-1)) {
+                heAdd = addEdge(
+                        polygon.get(0),
+                        polygon.get(c),
+                        polygon.get(s-1),
+                        polygon.get(c-1));
+                fillEdgeVisiblePolygonRecurse(constructPolygon(heAdd));
+            }
+            /* add edge pb -> pc */
+            if (c > 2) {
+                heAdd = addEdge(
+                        polygon.get(1),
+                        polygon.get(c),
+                        polygon.get(0),
+                        polygon.get(c));
+                fillEdgeVisiblePolygonRecurse(constructPolygon(heAdd));
+            }
+        }
+        if (TEST) test();
+    }
+
+/******************************************************************************/
+/* Splitting methods
+/******************************************************************************/
+
+    /*
+     * Splits the two faces sharing edge he into four faces by inserting
+     * point p.
+     */
+    private void splitEdge(Point p, HalfEdge he)
     {
         HalfEdge he1,he2,he3;
         HalfEdge heAdd1,heAdd2,heAdd3;
-        
-        if (MESSAGES) message("Snapping new interior point to nearest edge.");
-        if (DEBUG) {
-            if (he.isType(HalfEdge.BOUNDARY)) {
-                error("Snapping interior point to boundary!");
-            }
-        }
+
+        if (MESSAGES) message("Splitting edge %d.",halfEdges.indexOf(he));
+        assert ! he.isType(HalfEdge.BOUNDARY) :
+                error("Attempting to split boundary edge!");
         //he1 = he.next.next;
         he1 = findPrevious(he);
         he2 = he.sibling.next;
@@ -605,206 +752,45 @@ public class Mesh
         delaunayQueue.add(he2);
         delaunayQueue.add(he3);
     }
-    
-    public boolean addConstraint(Point pStart, Point pEnd)
+
+    /*
+     * Insert point p into the face with halfedge he1, splitting it into
+     * three faces.
+     */
+    private void splitFace(Point p, HalfEdge he1)
     {
-        assert points.contains(pStart) : error(E_MISSING);
-        assert points.contains(pEnd) : error(E_MISSING);
-        assert pStart != pEnd : error("Identical points!");
-        assert ! coincident(pStart,pEnd) : error("Coincident points!");
+        assert halfEdges.contains(he1) : error(E_MISSING);
 
-        int i;
-        Point pSearch0,pSearch1;
-        HalfEdge heSearch;
-        FaceWalk walk;
-        ArrayList<HalfEdge> polygon1 = new ArrayList(TYPICAL_POLYGON_SIZE);
+        HalfEdge he2,he3;
+        HalfEdge heAdd1,heAdd2,heAdd3;
 
-        if (MESSAGES) message(
-                "Constraining %d -> %d.",
-                points.indexOf(pStart),
-                points.indexOf(pEnd));
-        // find a halfedge at pStart headed toward pEnd
-        walk = startFaceWalk(pStart,pEnd);
-        heSearch = walk.he;
-        pSearch1 = heSearch.next.origin;
-        // check for trivial condition where the points are already connected
-        if (walk.status == FaceWalk.COINCIDENT) {
-            return constrainEdge(walk.he);
-        }
-        if (DEBUG) debugView(walk.he,"addConstraint: starting face walk");
-        // start clearing and building the lower polygon
-        heSearch = walk.he;
-        assert heSearch.origin == pStart;
-        assert heSearch.next.origin != pEnd;
-        polygon1.add(heSearch);
-        heSearch = heSearch.next;
-        assert heSearch.next.origin != pStart;
-        for (i=0; i<=halfEdges.size(); i++) {            
-            pSearch0 = heSearch.origin;
-            pSearch1 = heSearch.next.origin;
-            if (DEBUG) debugView(heSearch,"addConstraint: walking");
-            // check for termination
-            if (pSearch1 == pEnd) {
-                if (MESSAGES) message(
-                        "Found constraint end at halfedge %d.",
-                        halfEdges.indexOf(heSearch));
-                polygon1.add(heSearch);
-                break;
-            }
-            assert ! coincident(pSearch1,pStart) :
-                    error(E_COINCIDENT,pSearch1,pStart);
-            assert ! coincident(pSearch1,pEnd) :
-                    error(E_COINCIDENT,pSearch1,pEnd);
-            // check for collinearity
-            if (between(pStart,pEnd,pSearch1)) {
-                polygon1.add(heSearch);
-                addConstraintEdge(polygon1);
-                return addConstraint(pSearch1,pEnd);
-            }
-            // check for intersection
-            else if (intersect(pStart,pEnd,pSearch0,pSearch1)) {
-                assert ! heSearch.isType(HalfEdge.BOUNDARY) :
-                        error("Constraint crosses boundary edge!");
-                if (heSearch.isType(HalfEdge.AUXILARY)) {
-                    removeEdge(heSearch);
-                    heSearch = heSearch.sibling;
-                } else if (heSearch.isType(HalfEdge.CONSTRAINT)) {
-                    if (MESSAGES) message(
-                            "Constraint-constraint intersection found.");
-                    Point2d p = intersection(pStart,pEnd,pSearch0,pSearch1);
-                    splitConstraint(heSearch,p);
-                    polygon1.add(heSearch);
-                    addConstraintEdge(polygon1);
-                    heSearch = heSearch.sibling;
-                    polygon1.clear();
-                    polygon1.add(heSearch);
-                    pStart = heSearch.origin;
-                }
-            }
-            // accumulate the non-intersecting segments,
-            // which are the boundary of the polygon we need
-            // to later fill in addConstraintEdge()
-            else polygon1.add(heSearch);
-            heSearch = heSearch.next;
-        } assert i < halfEdges.size() : error(E_EXHAUSTED,pStart,pEnd);
-        addConstraintEdge(polygon1);
-        updateDelaunay();
-        return true;
-    }
-    
-    private void addConstraintEdge(ArrayList<HalfEdge> polygon1)
-    {
-        HalfEdge heSearch;
-        
-        heSearch = polygon1.get(polygon1.size()-1).next;
-        // check for trivial case where the edge already exists
-        if (heSearch.next == polygon1.get(0)) {
-            constrainEdge(heSearch);
-            polygon1.add(heSearch);
-        } else {
-            int i;
-            HalfEdge heAdd;
-            ArrayList<HalfEdge> polygon2 = new ArrayList(TYPICAL_POLYGON_SIZE);
-
-            // fill out polygon2
-            for (i=0; i<=halfEdges.size(); i++) {
-                polygon2.add(heSearch);
-                heSearch = heSearch.next;
-                if (heSearch == polygon1.get(0)) break;
-            } assert i < halfEdges.size() : error(E_EXHAUSTED);
-            // add new constraint edge
-            heAdd = addHalfEdge(polygon1.get(0).origin,polygon2.get(0).origin);
-            if (MESSAGES) message(
-                    "Adding constraint edge %d.",
-                    halfEdges.indexOf(heAdd));
-            heAdd.constrain();
-            heAdd.sibling.constrain();
-            // link halfedges
-            heAdd.next = polygon2.get(0);
-            heAdd.sibling.next = polygon1.get(0);
-            polygon1.get(polygon1.size()-1).next = heAdd.sibling;
-            polygon2.get(polygon2.size()-1).next = heAdd;
-            // fill the polygons on either side of the new constraint edge
-            polygon1.add(heAdd.sibling);
-            polygon2.add(heAdd);
-            fillPolygon(polygon2);
-        }
-        fillPolygon(polygon1);
+        if (MESSAGES) message("Adding interior point inside face.");
+        he2 = he1.next;
+        he3 = he2.next;
+        /* add new halfedges */
+        heAdd1 = addHalfEdge(p,he1.origin);
+        heAdd2 = addHalfEdge(p,he2.origin);
+        heAdd3 = addHalfEdge(p,he3.origin);
+        /* link half edges */
+        p.he = heAdd1;
+        heAdd1.next = he1;
+        heAdd2.next = he2;
+        heAdd3.next = he3;
+        he1.next = heAdd2.sibling;
+        he2.next = heAdd3.sibling;
+        he3.next = heAdd1.sibling;
+        heAdd1.sibling.next = heAdd3;
+        heAdd3.sibling.next = heAdd2;
+        heAdd2.sibling.next = heAdd1;
+        /* add halfedges to delaunay test */
+        delaunayQueue.add(heAdd1);
+        delaunayQueue.add(heAdd2);
+        delaunayQueue.add(heAdd3);
+        delaunayQueue.add(he1);
+        delaunayQueue.add(he2);
+        delaunayQueue.add(he3);
     }
 
-    protected void fillPolygon(HalfEdge he)
-    {
-        assert he != null;
-        assert halfEdges.contains(he) : error(E_MISSING);
-
-        int i;
-        HalfEdge heTest;
-        ArrayList<HalfEdge> polygon = new ArrayList(TYPICAL_POLYGON_SIZE);
-        
-        if (DEBUG) debugView(he,"fillPolygon: start");
-        polygon.add(he);
-        heTest = he.next;
-        for (i=0; i<=halfEdges.size(); i++) {
-            if (heTest == he) break;
-            polygon.add(heTest);
-            if (DEBUG) debugView(heTest,"fillPolygon: next");
-            heTest = heTest.next;
-        } assert i < halfEdges.size() : error(E_EXHAUSTED,he,he.origin);
-        fillPolygon(polygon);
-        if (TEST) test();
-    }
-    
-    protected void fillPolygon(ArrayList<HalfEdge> polygon)
-    {
-        fillPolygonRecurse(polygon);
-        delaunayQueue.addAll(polygon);
-    }
-            
-    private void fillPolygonRecurse(ArrayList<HalfEdge> polygon)
-    {
-        int s,c;
-        Point pa,pb,pc;
-        HalfEdge heAdd;
-        
-        if (MESSAGES) message(
-                "Filling polygon with %d sides.",
-                polygon.size());
-        if (DEBUG) debugView(polygon.get(0),"fillPolygon: start");
-        s = polygon.size();
-        if (s > 3) {
-            pa = polygon.get(0).origin;
-            pb = polygon.get(1).origin;
-            pc = polygon.get(2).origin;
-            c = 2;
-            for (int i=3; i<s; i++) {
-                Point p = polygon.get(i).origin;
-                if (incircle(pa,pb,pc,p) > 0) {
-                    pc = p;
-                    c = i;
-                }
-            }
-            /* add edge pa -> pc */
-            if (c < (s-1)) {
-                heAdd = addEdge(
-                        polygon.get(0),
-                        polygon.get(c),
-                        polygon.get(s-1),
-                        polygon.get(c-1));
-                fillPolygon(heAdd);
-            }
-            /* add edge pb -> pc */
-            if (c > 2) {
-                heAdd = addEdge(
-                        polygon.get(1),
-                        polygon.get(c),
-                        polygon.get(0),
-                        polygon.get(c));
-                fillPolygon(heAdd);
-            }
-        }
-        if (TEST) test();
-    }
-    
     private void splitConstraint(HalfEdge he, Point2d p)
     {
         int i;
@@ -881,8 +867,8 @@ public class Mesh
         p.he = null;
         points.remove(p);
         p.setType(Point.DELETED);
-        // stitch the polygon back together
-        fillPolygon(pPrev.he);
+        /* stitch the polygon back together */
+        fillEdgeVisiblePolygon(pPrev.he);
         updateDelaunay();
         nBoundary--;
     }
@@ -891,20 +877,55 @@ public class Mesh
     {
         assert points.contains(p) : error(E_MISSING);
 
-        HalfEdge heStart;
+        int i;
+        Point p1,p2,p3;
+        HalfEdge heSearch,heFlip;
+        LinkedList<HalfEdge> star = new LinkedList();
         
         if (MESSAGES) message("Removing interior point.");
-        heStart = p.he.next;
-        removePoint(p);
-        fillPolygon(heStart);
+        /* construct the star of halfedges around p */
+        heSearch = p.he;
+        for (i=0; i<=halfEdges.size(); i++) {
+            star.add(heSearch);
+            heSearch = heSearch.next.next.sibling;
+            if (heSearch == p.he) break;
+        } assert i < halfEdges.size() : error(E_EXHAUSTED);
+        assert star.size() >= 3;
+        if (star.size() == 3) {
+            for (HalfEdge he : star) removeEdge(he);
+        } else {
+            while (star.size() > 4) {
+                heFlip = star.pop();
+                p1 = heFlip.sibling.origin;
+                p2 = heFlip.next.next.origin;
+                p3 = heFlip.sibling.next.next.origin;
+                if (orient(p2,p3,p)*orient(p2,p3,p1) < 0) {
+                    flipEdge(heFlip);
+                } else {
+                    star.add(heFlip);
+                }
+            }
+            assert star.size() == 4;
+            heSearch = star.get(0).next;
+            for (HalfEdge he : star) removeEdge(he);
+            fillQuadrilateral(heSearch);
+        }
+        p.he = null;
+        points.remove(p);
+        p.setType(Point.DELETED);
         updateDelaunay();
     }
 
+    /*
+     * Removes an interior point without refilling.
+     *
+     * @params p
+     */
     private void removePoint(Point p)
     {
         assert points.contains(p) : error(E_MISSING);
         assert ! p.isType(Point.DELETED) : error("Re-removing point!");
-
+    
         int i;
         HalfEdge he = p.he;
 
@@ -922,7 +943,7 @@ public class Mesh
         p.setType(Point.DELETED);
         p.he = null;
     }
-    
+
     private void removeEdge(HalfEdge he)
     {
         assert halfEdges.contains(he) : error(E_MISSING);
@@ -935,23 +956,23 @@ public class Mesh
 
         hePrev = findPrevious(he);
         heSibPrev = findPrevious(he.sibling);
-        // remove halfedges
+        /* remove halfedges */
         halfEdges.remove(he);
         halfEdges.remove(he.sibling);
         delaunayQueue.remove(he);
         delaunayQueue.remove(he.sibling);
-        // cache the constraints
+        /* cache the constraints */
         if (he.isType(HalfEdge.CONSTRAINT)) {
             removedConstraints.add(he.next.origin);
         }
-        // update point->halfedge pointers
+        /* update point->halfedge pointers */
         if (he.sibling == hePrev) {
-            // this was the last halfedge eminating from he.origin
+            /* this was the last halfedge eminating from he.origin */
             if (DEBUG) debugView(he.origin,"removeEdge: orphan point");
             he.origin.he = null;
             updateHalfEdge(he.next);
         } else if (he.next == he.sibling) {
-            // this was the last halfedge eminating from he.sibling.origin
+            /* this was the last halfedge eminating from he.sibling.origin */
             if (DEBUG) debugView(he.next.origin,"removeEdge: orphan point");
             he.next.origin.he = null;
             updateHalfEdge(he.sibling.next);
@@ -959,7 +980,7 @@ public class Mesh
             updateHalfEdge(he.next);
             updateHalfEdge(he.sibling.next);
         }
-        // relink halfedges
+        /* relink halfedges */
         hePrev.next = he.sibling.next;
         heSibPrev.next = he.next;
     }
@@ -998,8 +1019,8 @@ public class Mesh
                         inside = true;
                         for (int j=1; j<bounds.length; j++) {
                             if (intersect(p1,p2,bounds[j-1],bounds[j])) {
-                                // check if p2 lies strictly outside the bounds
-                                // (i.e. is not colinear with the bounds)
+                                /* check if p2 lies strictly outside the bounds
+                                 * (i.e. is not colinear with the bounds) */
                                 if (orient(bounds[j-1],bounds[j],p2) != 0) {
                                     inside = false;
                                 }
@@ -1165,11 +1186,11 @@ public class Mesh
         for (i=0; i<=halfEdges.size(); i++) {
             if (he.isType(HalfEdge.BOUNDARY)) break;
             removeEdge(he.sibling);
-            // walk around p counter-clockwise
+            /* walk around p counter-clockwise */
             he = he.sibling.next.next;
         } assert i < halfEdges.size() : E_EXHAUSTED;
 
-        fillPolygon(p.he);
+        fillGeneralPolygon(p.he);
         restoreConstraints(p);
         updateDelaunay();
         if (TEST) test();
@@ -1231,10 +1252,9 @@ public class Mesh
         } assert i < halfEdges.size() : E_EXHAUSTED;
         // sweep along the new boundary edges to remove intersecting edges
         deleteQueue.clear();
-        //initRemoveConstraints(p);
         clearNewBoundaryEdge(pPrev,pTemp);
         clearNewBoundaryEdge(pTemp,pNext);
-        // flood fill to remove points and edges inside the quad
+        /* flood fill to remove points and edges inside the quad */
         if (MESSAGES) message(
                 "Performing flood delete to remove outside points.");
         Point[] bounds = new Point[4];
@@ -1243,15 +1263,12 @@ public class Mesh
         bounds[2] = pNext;
         bounds[3] = p;
         floodDelete(bounds);
-        // remove pTemp
         if (MESSAGES) message("Removing placeholder interior point.");
         removePoint(pTemp);
-        // update the location of the boundary point
         if (MESSAGES) message("Relocating boundary point and boundary edges.");
         p.x = pTemp.x;
         p.y = pTemp.y;
-        fillPolygon(p.he);
-        //restoreConstraints(p);
+        fillGeneralPolygon(p.he);
         updateDelaunay();
         return true;
     }
@@ -1338,8 +1355,9 @@ public class Mesh
      * concave or convex. If the boundary is guaranteed to be a convex, a
      * smarter face-walking algorithm could be used.
      */
-    public HalfEdge findFace(HalfEdge heStart, Point p)
+    public FaceWalk findFaceBruteForce(HalfEdge heStart, Point p)
     {
+        double[] ccw = new double[3];
         HalfEdge he1,he2;
         
         clearFlags(HalfEdge.FLAG_ALGORITHM);
@@ -1347,19 +1365,20 @@ public class Mesh
             if (he0.isFlagged(HalfEdge.FLAG_ALGORITHM)) continue;
             he1 = he0.next;
             he2 = he1.next;
-            if (DEBUG) {
-                if (he2.next != he0) error("Found non-face!");
-            }
+            assert he2.next == he0 : error("Found non-face!");
             he0.flag(HalfEdge.FLAG_ALGORITHM);
             he1.flag(HalfEdge.FLAG_ALGORITHM);
             he2.flag(HalfEdge.FLAG_ALGORITHM);
-            if (between(he0.origin,he1.origin,p)) return he0;
-            else if (orient(he0.origin,he1.origin,p) <= 0) continue;
-            if (between(he1.origin,he2.origin,p)) return he1;
-            else if (orient(he1.origin,he2.origin,p) <= 0) continue;
-            if (between(he2.origin,he0.origin,p)) return he2;
-            else if (orient(he2.origin,he0.origin,p) <= 0) continue;
-            return he0;
+            ccw[0] = orient(he0.origin,he1.origin,p);
+            if (ccw[0] < 0) continue;
+            ccw[1] = orient(he1.origin,he2.origin,p);
+            if (ccw[1] < 0) continue;
+            ccw[2] = orient(he2.origin,he0.origin,p);
+            if (ccw[2] < 0) continue;
+            if (ccw[0] == 0) return new FaceWalk(he0,FaceWalk.COINCIDENT);
+            if (ccw[1] == 0) return new FaceWalk(he1,FaceWalk.COINCIDENT);
+            if (ccw[2] == 0) return new FaceWalk(he2,FaceWalk.COINCIDENT);
+            return new FaceWalk(he0,FaceWalk.CLOCKWISE);
         }
         if (DEBUG) {
             error("Exhausted faces!");
@@ -1367,42 +1386,57 @@ public class Mesh
         return null;
     }
 
-    /*public HalfEdge findFace(HalfEdge heStart, Point p)
+    /**
+     * A slightly smarter face walk routine that resorts to brute force
+     * only when it gets confused by an concave boundary.
+     */
+    public FaceWalk findFace(HalfEdge heStart, Point p)
     {
         int i;
-        double ccw;
-        HalfEdge heTest = null;
+        double[] ccw = new double[3];
+        HalfEdge he0,he1,he2;
         LinkedList<HalfEdge> queue = new LinkedList();
 
         clearFlags(HalfEdge.FLAG_ALGORITHM);
         queue.add(heStart);
         queue.addAll(halfEdges);
-        heTest = queue.pop();
+        he0 = queue.pop();
         for (i=0; i<=halfEdges.size(); i++) {
-            if (heTest.isFlagged(HalfEdge.FLAG_ALGORITHM)) {
-                heTest = queue.pop();
+            if (he0.isFlagged(HalfEdge.FLAG_ALGORITHM)) {
+                he0 = queue.pop();
                 continue;
             }
-            assert heTest.next.next.next == heTest : error("Found non-face!");
-            heTest.flag(HalfEdge.FLAG_ALGORITHM);
-            heTest.next.flag(HalfEdge.FLAG_ALGORITHM);
-            heTest.next.next.flag(HalfEdge.FLAG_ALGORITHM);
-            for (int j=0; j<3; j++) {
-                ccw = orient(heTest.origin,heTest.next.origin,p);
-                if (ccw == 0) {
-                    if (between(heTest.origin,heTest.next.origin,p)) {
-                        return heTest;
-                    }
-                } else if (ccw < 0) {
-                    heTest = heTest.sibling;
-                    break;
-                }
-                heTest = heTest.next;
+            he1 = he0.next;
+            he2 = he1.next;
+            assert he2.next == he0 : error("Found non-face!");
+            he0.flag(HalfEdge.FLAG_ALGORITHM);
+            he1.flag(HalfEdge.FLAG_ALGORITHM);
+            he2.flag(HalfEdge.FLAG_ALGORITHM);
+            ccw[0] = orient(he0.origin,he1.origin,p);
+            if (ccw[0] < 0) {
+                he0 = he0.sibling;
+                continue;
             }
+            ccw[1] = orient(he1.origin,he2.origin,p);
+            if (ccw[1] < 0) {
+                he0 = he1.sibling;
+                continue;
+            }
+            ccw[2] = orient(he2.origin,he0.origin,p);
+            if (ccw[2] < 0) {
+                he0 = he2.sibling;
+                continue;
+            }
+            if (ccw[0] == 0) return new FaceWalk(he0,FaceWalk.COINCIDENT);
+            if (ccw[1] == 0) return new FaceWalk(he1,FaceWalk.COINCIDENT);
+            if (ccw[2] == 0) return new FaceWalk(he2,FaceWalk.COINCIDENT);
+            return new FaceWalk(he0,FaceWalk.CLOCKWISE);
         } assert i < halfEdges.size() : error(E_EXHAUSTED);
-        assert halfEdges.contains(heTest) : error(E_MISSING);
-        return heTest;
-    }*/
+        if (DEBUG) {
+            error("Exhausted faces!");
+        }
+        return null;
+    }
     
     protected final HalfEdge findPrevious(HalfEdge he)
     {
@@ -1489,7 +1523,7 @@ public class Mesh
             he = hePrev.sibling;
         } assert i < halfEdges.size() : E_EXHAUSTED;
 
-        // return a failed walk at this
+        // return a failed walk at this point
         return new FaceWalk(null,FaceWalk.FAILED);
     }
     
@@ -1756,18 +1790,20 @@ public class Mesh
         else return true;
     }
     
-    // test whether c is within the epsilon tubular neighborhood
-    // around segment ab
+    /*
+     * Tests whether c is within the epsilon tubular neighborhood
+     * around segment ab.
+     */
     public final boolean between(
             Point2d a,
             Point2d b,
             Point2d c)
     {
-        // check the epsilon neighborhood at the endpoints
+        /* check the epsilon neighborhood at the endpoints */
         if (coincident(a,c)) return true;
         else if (coincident(b,c)) return true;
         else {
-            // check the epsilon neighborhood along the segment
+            /* check the epsilon neighborhood along the segment */
             if (perpDistSq(a,b,c) < epsilon) {
                 double d = projNorm(a,b,c);
                 if (0 < d && d < 1) return true;
@@ -1776,17 +1812,21 @@ public class Mesh
         return false;
     }
     
-    // same as between, but exclude the epsilon neighborhood around a and b
+    /*
+     * Tests whether c is within the epsilon tubular neighborhood
+     * around segment ab, but excludes the epsilon neighborhoods
+     * around a and b.
+     */
     public final boolean betweenProper(
             Point2d a,
             Point2d b,
             Point2d c)
     {
-        // reject the epsilon neighborhood at the endpoints
+        /* reject the epsilon neighborhood at the endpoints */
         if (coincident(a,c)) return false;
         else if (coincident(b,c)) return false;
         else {
-            // check the epsilon neighborhood along the segment
+            /* check the epsilon neighborhood along the segment */
             if (perpDistSq(a,b,c) < epsilon) {
                 double d = projNorm(a,b,c);
                 if (0 < d && d < 1) return true;
@@ -1801,8 +1841,8 @@ public class Mesh
      *
      * Adapted from Jonathan Shewchuk's predicates.c orient2d() routine.
      * This implementation uses only a single-level floating-point filter,
-     * rather than a fully adaptive (and hence more efficient) method.
-     * 
+     * which is a simplified and less efficient version of his multi-level
+     * adaptive method.
      */
     public final double orient(
             Point2d pa,
@@ -1846,8 +1886,8 @@ public class Mesh
      * Orientation predicate that returns positive if ray a->b must
      * turn counter-clockwise to intersect vertex c.
      *
-     * Exact calculation using the Apfloat arbitrary precision library.
-     *
+     * Performs an exact calculation using the Apfloat arbitrary-precision
+     * library.
      */
     public final double orientExact(
             Point2d pa,
@@ -1891,7 +1931,9 @@ public class Mesh
         return (double)det.compareTo(Apfloat.ZERO);
     }
 
-    // non-robust version
+    /*
+     * Non-robust, deprecated orientation predicate.
+     */
     public final double orientNonRobust(
             Point2d a,
             Point2d b,
@@ -2250,25 +2292,5 @@ public class Mesh
             debugView(s,args);
         }
         return error(s);
-    }
-}
-
-/******************************************************************************/
-/* Helper classes
-/******************************************************************************/
-
-final class FaceWalk
-{
-    final static int FAILED     = -1;
-    final static int COINCIDENT =  0;
-    final static int CLOCKWISE  =  1;
-
-    final HalfEdge he;
-    final int status;
-
-    FaceWalk(HalfEdge he, int status)
-    {
-        this.he = he;
-        this.status = status;
     }
 }
