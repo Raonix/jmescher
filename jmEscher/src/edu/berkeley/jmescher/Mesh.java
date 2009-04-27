@@ -103,7 +103,8 @@ public class Mesh
     public final double epsilon;
 
     /* floating point filter for robust predicates */
-    private final double floatingPointFilter;
+    private final double orientErrorBound;
+    private final double incircleErrorBound;
     
     /* mesh data */
     protected LinkedList<Point> points = new LinkedList();
@@ -130,20 +131,22 @@ public class Mesh
     {
         this.epsilon = epsilon;
         if (DEBUG) debugObjects = new HashSet();
-        floatingPointFilter = initFloatingPointFilter();
+        double e = initMachineEpsilon();
+        orientErrorBound = (3.0 + 16.0 * e) * e;
+        incircleErrorBound = (10.0 + 96.0 * e) * e;
     }
 
     /*
-     * Initializes the floating point filter, the threshold at which orientation
-     * calculations become unreliable and the orientation predicate
-     * has to resort to exact arithmetic.
+     * Find the machine epsilons, which is used in initializing the floating
+     * point filter, the threshold at which predicate calculations become
+     * unreliable and exact arithmetic is neccessary.
      *
      * This routine is adapted from Jonathan Shewchuk's predicates.c
-     * initexact() routine.
+     * exactinit() routine.
      *
      * @return
      */
-    double initFloatingPointFilter()
+    double initMachineEpsilon()
     {
         double half, e, splitter, check, lastcheck;
         boolean every_other;
@@ -167,7 +170,7 @@ public class Mesh
             check = 1.0 + e;
         } while ((check != 1.0) && (check != lastcheck));
         splitter += 1.0;
-        return (3.0 + 16.0 * e) * e;
+        return e;
     }
     
 /******************************************************************************/
@@ -698,7 +701,7 @@ public class Mesh
                         polygon.get(1),
                         polygon.get(c),
                         polygon.get(0),
-                        polygon.get(c));
+                        polygon.get(c-1));
                 fillEdgeVisiblePolygonRecurse(constructPolygon(heAdd));
             }
         }
@@ -1872,7 +1875,7 @@ public class Mesh
             return det;
         }
 
-        errbound = floatingPointFilter * detsum;
+        errbound = orientErrorBound * detsum;
         if ((det >= errbound) || (-det >= errbound)) {
             return det;
         }
@@ -1894,11 +1897,6 @@ public class Mesh
             Point2d pb,
             Point2d pc)
     {
-        /*
-         * detleft = (pa.x - pc.x) * (pb.y - pc.y);
-         * detright = (pa.y - pc.y) * (pb.x - pc.x);
-         * det = detleft - detright;
-         */
         Apfloat ax,ay,bx,by,cx,cy;
         Apfloat acx,bcx,acy,bcy;
         Apfloat detleft,detright,det;
@@ -1943,14 +1941,151 @@ public class Mesh
         return cross(a,b,c);
     }
     
-    // borrowed from Jonathan Shewchuk's predicates.c
-/*  incirclefast()   Approximate 2D incircle test.  Nonrobust.               */
-/*               Return a positive value if the point pd lies inside the     */
-/*               circle passing through pa, pb, and pc; a negative value if  */
-/*               it lies outside; and zero if the four points are cocircular.*/
-/*               The points pa, pb, and pc must be in counterclockwise       */
-/*               order, or the sign of the result will be reversed.          */
-    public final static int incircle(
+    /*
+     * Incircle predicate that returns positive if point pd lies inside
+     * the circumcircle through pa, pb, and pc.
+     *
+     * Adapted from Jonathan Shewchuk's predicates.c incircle() routine.
+     * This implementation uses only a single-level floating-point filter,
+     * which is a simplified and less efficient version of his multi-level
+     * adaptive method.
+     */
+    public final double incircle(
+            Point2d pa,
+            Point2d pb,
+            Point2d pc,
+            Point2d pd)
+    {
+        double adx, ady, bdx, bdy, cdx, cdy;
+        double bdxcdy, cdxbdy, cdxady, adxcdy, adxbdy, bdxady;
+        double alift, blift, clift;
+        double det;
+        double permanent, errbound;
+
+        adx = pa.x - pd.x;
+        bdx = pb.x - pd.x;
+        cdx = pc.x - pd.x;
+        ady = pa.y - pd.y;
+        bdy = pb.y - pd.y;
+        cdy = pc.y - pd.y;
+
+        bdxcdy = bdx * cdy;
+        cdxbdy = cdx * bdy;
+        alift = adx * adx + ady * ady;
+
+        cdxady = cdx * ady;
+        adxcdy = adx * cdy;
+        blift = bdx * bdx + bdy * bdy;
+
+        adxbdy = adx * bdy;
+        bdxady = bdx * ady;
+        clift = cdx * cdx + cdy * cdy;
+
+        det = alift * (bdxcdy - cdxbdy)
+                + blift * (cdxady - adxcdy)
+                + clift * (adxbdy - bdxady);
+
+        if (bdxcdy < 0) bdxcdy = -bdxcdy;
+        if (cdxbdy < 0) cdxbdy = -cdxbdy;
+        if (cdxady < 0) cdxady = -cdxady;
+        if (adxcdy < 0) adxcdy = -adxcdy;
+        if (adxbdy < 0) adxbdy = -adxbdy;
+        if (bdxady < 0) bdxady = -bdxady;
+
+        permanent = (bdxcdy + cdxbdy) * alift
+                + (cdxady + adxcdy) * blift
+                + (adxbdy + bdxady) * clift;
+        errbound = incircleErrorBound * permanent;
+        if ((det > errbound) || (-det > errbound)) {
+            return det;
+        }
+
+        return incircleExact(pa, pb, pc, pd);
+    }
+
+    /*
+     * Incircle predicate that returns positive if point pd lies inside
+     * the circumcircle through pa, pb, and pc.
+     *
+     * Performs an exact calculation using the Apfloat arbitrary-precision
+     * library.
+     */
+    public final double incircleExact(
+            Point2d pa,
+            Point2d pb,
+            Point2d pc,
+            Point2d pd)
+    {
+        Apfloat ax,ay,bx,by,cx,cy,dx,dy;
+        Apfloat adx, ady, bdx, bdy, cdx, cdy;
+        Apfloat bdxcdy, cdxbdy, cdxady, adxcdy, adxbdy, bdxady;
+        Apfloat alift, blift, clift;
+        Apfloat det;
+
+        det = Apfloat.ZERO;
+
+        try {
+            ax = new Apfloat(pa.x);
+            ay = new Apfloat(pa.y);
+            bx = new Apfloat(pb.x);
+            by = new Apfloat(pb.y);
+            cx = new Apfloat(pc.x);
+            cy = new Apfloat(pc.y);
+            dx = new Apfloat(pd.x);
+            dy = new Apfloat(pd.y);
+
+            dx = dx.negate();
+            dy = dy.negate();
+
+            adx = org.apfloat.ApfloatMath.sum(ax,dx);
+            bdx = org.apfloat.ApfloatMath.sum(bx,dx);
+            cdx = org.apfloat.ApfloatMath.sum(cx,dx);
+            ady = org.apfloat.ApfloatMath.sum(ay,dy);
+            bdy = org.apfloat.ApfloatMath.sum(by,dy);
+            cdy = org.apfloat.ApfloatMath.sum(cy,dy);
+
+            bdxcdy = org.apfloat.ApfloatMath.product(bdx,cdy);
+            cdxbdy = org.apfloat.ApfloatMath.product(cdx,bdy);
+
+            cdxady = org.apfloat.ApfloatMath.product(cdx,ady);
+            adxcdy = org.apfloat.ApfloatMath.product(adx,cdy);
+
+            adxbdy = org.apfloat.ApfloatMath.product(adx,bdy);
+            bdxady = org.apfloat.ApfloatMath.product(bdx,ady);
+
+            adx = org.apfloat.ApfloatMath.product(adx,adx);
+            ady = org.apfloat.ApfloatMath.product(ady,ady);
+            alift = org.apfloat.ApfloatMath.sum(adx,ady);
+
+            bdx = org.apfloat.ApfloatMath.product(bdx,bdx);
+            bdy = org.apfloat.ApfloatMath.product(bdy,bdy);
+            blift = org.apfloat.ApfloatMath.sum(bdx,bdy);
+
+            cdx = org.apfloat.ApfloatMath.product(cdx,cdx);
+            cdy = org.apfloat.ApfloatMath.product(cdy,cdy);
+            clift = org.apfloat.ApfloatMath.sum(cdx,cdy);
+
+            alift = org.apfloat.ApfloatMath.product(alift,
+                    org.apfloat.ApfloatMath.sum(bdxcdy,cdxbdy.negate()));
+            blift = org.apfloat.ApfloatMath.product(blift,
+                    org.apfloat.ApfloatMath.sum(cdxady,adxcdy.negate()));
+            clift = org.apfloat.ApfloatMath.product(clift,
+                    org.apfloat.ApfloatMath.sum(adxbdy,bdxady.negate()));
+
+            det = org.apfloat.ApfloatMath.sum(alift,blift,clift);
+        } catch (ApfloatRuntimeException e) {
+            System.err.println("Unable to complete exact incircle calculation!");
+            System.err.println(e.getMessage());
+        }
+        if (MESSAGES) message("incircleExact = %g\n", det.doubleValue());
+
+        return (double)det.compareTo(Apfloat.ZERO);
+    }
+
+    /*
+     * Non-robust, deprecated incircle predicate.
+     */
+    public final static int incircleNonRobust(
             Point2d a,
             Point2d b,
             Point2d c,
@@ -1976,7 +2111,7 @@ public class Mesh
 
         return (int)Math.signum(alift * bcdet + blift * cadet + clift * abdet);
     }
-    
+
     // adapted from java.awt.geom.Line2d.ptSegDistSq()
     public final static double edgeDistanceSq(
             Point2d p1,
