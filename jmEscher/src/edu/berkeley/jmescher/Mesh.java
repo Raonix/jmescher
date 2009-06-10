@@ -37,6 +37,7 @@ import java.util.LinkedList;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
+import javax.swing.JPanel;
 import javax.vecmath.Point2d;
 import javax.vecmath.Point3d;
 import javax.vecmath.Vector2d;
@@ -45,7 +46,7 @@ import org.apfloat.ApfloatRuntimeException;
 
 /**
  * Represents a 2D triangulation using points (vertices) and halfedges.
- * Triangulation is accomplished using an interactive constrained Delaunay
+ * Triangulation is performed by an interactive constrained Delaunay
  * algorithm. Point insertion uses Lawson's algorithm. Constraint insertion
  * and removal, as well as vertex removal and relocation are supported.
  *
@@ -54,6 +55,8 @@ import org.apfloat.ApfloatRuntimeException;
  *
  * Howison, M. CAD Tools for Creating Space-filling 3D Escher Tiles.
  * Master’s thesis, U.C. Berkeley, Berkeley, CA, May 2009.
+ * (also Tech Report EECS-2009-56,
+ *     http://www.eecs.berkeley.edu/Pubs/TechRpts/2009/EECS-2009-56.html)
  *
  * Or contact the author: mark.howison <at> gmail <dot> com
  *
@@ -97,6 +100,7 @@ public class Mesh
     public boolean toggleDebugSuspend = false;
     protected HashSet debugObjects;
     protected JFrame debugFrame = null;
+    protected JPanel debugPanel = null;
     private boolean testing = false;
 
     /* epsilon squared (i.e. for use in squared distance comparisons) */
@@ -130,31 +134,28 @@ public class Mesh
     public Mesh(double epsilon)
     {
         this.epsilon = epsilon;
-        if (DEBUG) debugObjects = new HashSet();
         double e = initMachineEpsilon();
         orientErrorBound = (3.0 + 16.0 * e) * e;
         incircleErrorBound = (10.0 + 96.0 * e) * e;
+        if (DEBUG) debugObjects = new HashSet();
     }
 
     /*
-     * Find the machine epsilons, which is used in initializing the floating
+     * Find the machine epsilon, which is used in initializing the floating
      * point filter, the threshold at which predicate calculations become
      * unreliable and exact arithmetic is neccessary.
      *
      * This routine is adapted from Jonathan Shewchuk's predicates.c
      * exactinit() routine.
      *
-     * @return
+     * @return  machine epsilon
      */
     double initMachineEpsilon()
     {
-        double half, e, splitter, check, lastcheck;
-        boolean every_other;
+        double half, e, check, lastcheck;
 
-        every_other = true;
         half = 0.5;
         e = 1.0;
-        splitter = 1.0;
         check = 1.0;
         /* Repeatedly divide `epsilon' by two until it is too small to add to    */
         /*   one without causing roundoff.  (Also check if the sum is equal to   */
@@ -163,13 +164,8 @@ public class Mesh
         do {
             lastcheck = check;
             e *= half;
-            if (every_other) {
-                splitter *= 2.0;
-            }
-            every_other = !every_other;
             check = 1.0 + e;
         } while ((check != 1.0) && (check != lastcheck));
-        splitter += 1.0;
         return e;
     }
     
@@ -292,6 +288,11 @@ public class Mesh
     {
         debugFrame = f;
     }
+
+    public void setDebugPanel(JPanel p)
+    {
+        debugPanel = p;
+    }
     
     public void translate(double x, double y)
     {
@@ -304,6 +305,15 @@ public class Mesh
 /******************************************************************************/
 /* Insertion methods
 /******************************************************************************/
+
+    public static void linkBoundary(BPoint[] pts)
+    {
+        int s = pts.length;
+        for (int i=0; i<s; i++) {
+            pts[i].next = pts[(i+1)%s];
+            pts[i].prev = pts[(i-1+s)%s];
+        }
+    }
 
     // expects a list of points in *clockwise* order for specifiying
     // an initial boundary for the mesh
@@ -347,6 +357,8 @@ public class Mesh
 
     /*
      * Adds an edge connecting the origins of he1 and he2.
+     *
+     * @return  the halfedge from he1.origin to he2.origin
      */
     private HalfEdge addEdge(
             HalfEdge he1,
@@ -354,8 +366,10 @@ public class Mesh
             HalfEdge he1prev,
             HalfEdge he2prev)
     {
-        assert he1prev.next == he1 : error(E_HALFEDGE);
-        assert he2prev.next == he2 : error(E_HALFEDGE);
+        assert he1prev.next == he1 : error(E_HALFEDGE,he1,he1prev);
+        assert he2prev.next == he2 : error(E_HALFEDGE,he2,he2prev);
+        assert he1 != he2 : error(E_COINCIDENT);
+        assert he1.origin != he2.origin: error(E_COINCIDENT);
 
         HalfEdge heAdd = addHalfEdge(he1.origin,he2.origin);
         delaunayQueue.add(heAdd);
@@ -363,7 +377,6 @@ public class Mesh
         he1prev.next = heAdd;
         heAdd.sibling.next = he1;
         he2prev.next = heAdd.sibling;
-        if (TEST) test();
         return heAdd;
     }
     
@@ -485,13 +498,13 @@ public class Mesh
             assert ! coincident(pSearch1,pEnd) :
                     error(E_COINCIDENT,pSearch1,pEnd);
             /* check for collinearity */
-            if (between(pStart,pEnd,pSearch1)) {
+            //if (between(pStart,pEnd,pSearch1)) {
                 /* split the constraint in two with pSearch1 as the midpoint */
-                addConstraintEdge(heStart,heSearch.next,heStartPrev,heSearch);
+                /*addConstraintEdge(heStart,heSearch.next,heStartPrev,heSearch);
                 return addConstraint(pSearch1,pEnd);
-            }
+            }*/
             /* check for intersection */
-            else if (intersect(pStart,pEnd,pSearch0,pSearch1)) {
+            if (intersect(pStart,pEnd,pSearch0,pSearch1)) {
                 assert ! heSearch.isType(HalfEdge.BOUNDARY) :
                         error("Constraint crosses boundary edge!");
                 if (heSearch.isType(HalfEdge.AUXILARY)) {
@@ -567,7 +580,7 @@ public class Mesh
         for (i=0; i<=halfEdges.size(); i++) {
             if (heSearch == he) break;
             polygon.add(heSearch);
-            if (DEBUG) debugView(heSearch,"fillPolygon: next");
+            if (DEBUG) debugView(heSearch,"constructPolygon: next");
             heSearch = heSearch.next;
         } assert i < halfEdges.size() : error(E_EXHAUSTED,he,he.origin);
 
@@ -686,6 +699,8 @@ public class Mesh
                     c = i;
                 }
             }
+            if (DEBUG) debugView(polygon.get(c),
+                    "fillPolygon: largest circumcircle");
             /* add edge pa -> pc */
             if (c < (s-1)) {
                 heAdd = addEdge(
@@ -699,10 +714,10 @@ public class Mesh
             if (c > 2) {
                 heAdd = addEdge(
                         polygon.get(1),
-                        polygon.get(c),
+                        polygon.get(c-1).next,
                         polygon.get(0),
                         polygon.get(c-1));
-                fillEdgeVisiblePolygonRecurse(constructPolygon(heAdd));
+                fillEdgeVisiblePolygonRecurse(constructPolygon(heAdd.sibling));
             }
         }
         if (TEST) test();
@@ -838,7 +853,20 @@ public class Mesh
 /* Removal methods
 /******************************************************************************/
 
-    public void removeBoundaryPoint(Point p, Point pPrev)
+    public void removeBoundaryPoint(BPoint bp) {
+        BPoint bp1,bp2;
+        /* The boundary is oriented clockwise, opposite of the halfedge
+         * orientation (counter-clockwise). Therefore, the "previous" point
+         * to bp is actually the next point along the boundary. */
+        removeBoundaryPoint(bp,bp.next);
+        /* relink boundary */
+        bp1 = bp.prev;
+        bp2 = bp.next;
+        bp1.next = bp2;
+        bp2.prev = bp1;
+    }
+
+    private void removeBoundaryPoint(Point p, Point pPrev)
     {
         int i;
         Point pNext;
@@ -1143,31 +1171,38 @@ public class Mesh
         restoreConstraints(p);
         updateDelaunay();
     }
-    
-    public boolean updateBoundaryPointAlong(Point p, Point pPrev)
+
+/*    public boolean updateBoundaryPoint(BPoint bp, Point2d pNew)
     {
-        assert points.contains(p) : error(E_MISSING);
-        assert points.contains(pPrev) : error(E_MISSING);
+        assert points.contains(bp) : error(E_MISSING);
 
-        int i;
-        Point pNext;
-        HalfEdge heTest;
+        if (between(bp.prev,bp,pNew)) {
+            return updateBoundaryPointAlong(bp,bp.he,pNew);
+        }
+        if (between(bp,bp.next,pNew)) {
+            return updateBoundaryPointAlong(bp,bp.next.he,pNew);
+        }
+        return false;
+    }*/
+    
+    private boolean updateBoundaryPointAlong(
+            BPoint bp,
+            HalfEdge he,
+            Point2d pNew)
+    {
+        BPoint bpNew;
 
-        pNext = p.he.next.origin;
-        heTest = p.he.next.next;
-
-        for (i=0; i<=halfEdges.size(); i++) {
-            if (heTest == pPrev.he) break;
-            if (    between(pPrev,p,heTest.origin)
-                 || between(p,pNext,heTest.origin))
-            {
-                if (heTest.origin.isType(Point.BOUNDARY)) {
-                    return false;
-                }
-                removeInteriorPoint(heTest.origin);
-            }
-            heTest = heTest.sibling.next.next;
-        } assert i < halfEdges.size() : error(E_EXHAUSTED);
+        bpNew = new BPoint(pNew);
+        addBoundaryPoint(bpNew,he);
+        removeBoundaryPoint(bp,bp.next);
+        bp.set(bpNew);
+        bp.setType(Point.BOUNDARY);
+        bp.prev = bpNew.prev;
+        bp.prev.next = bp;
+        bp.next = bpNew.next;
+        bp.next.prev = bp;
+        bp.he = bpNew.he;
+        bp.he.origin = bp;
 
         return true;
     }
@@ -1214,11 +1249,11 @@ public class Mesh
         // locate the previous and next boundary points
         pNext = p.he.next.origin;
         // check for coincidence
-        if (coincident(p,pTemp)) {
+        /*if (coincident(p,pTemp)) {
             p.x = pTemp.x;
             p.y = pTemp.y;
             return updateBoundaryPointAlong(p,pPrev);
-        }
+        }*/
         // relocate p to ensure that the quadrilateral (p,pPrev,pTemp,pNext)
         // is a simple polygon
         if (intersectProper(pPrev,p,pNext,pTemp)) {
@@ -1273,6 +1308,30 @@ public class Mesh
         p.y = pTemp.y;
         fillGeneralPolygon(p.he);
         updateDelaunay();
+        return true;
+    }
+
+    private boolean validateBoundary(BPoint bp)
+    {
+        BPoint bpTest;
+        bpTest = bp.next;
+        for (int j=3; j<nBoundary; j++) {
+            if (intersect(
+                    bp.prev,
+                    bp,
+                    bpTest,
+                    bpTest.next)) return false;
+            bpTest = bpTest.next;
+        }
+        bpTest = bp.prev;
+        for (int j=3; j<nBoundary; j++) {
+            if (intersect(
+                    bp,
+                    bp.next,
+                    bpTest.prev,
+                    bpTest)) return false;
+            bpTest = bpTest.prev;
+        }
         return true;
     }
     
@@ -1734,17 +1793,25 @@ public class Mesh
             Point2d c,
             Point2d d)
     {
-        double cdx = c.x - d.x;
-        double cdy = c.y - d.y;
+        double t,l1,l2;
+        double cdx,cdy;
+        Point2d p;
+
+        cdx = c.x - d.x;
+        cdy = c.y - d.y;
         // distance from a to cd
-        double l1 = Math.abs((a.x - d.x)*cdy - (a.y - d.y)*cdx);
+        l1 = Math.abs((a.x - d.x)*cdy - (a.y - d.y)*cdx);
         // distance from b to cd
-        double l2 = Math.abs((b.x - d.x)*cdy - (b.y - d.y)*cdx);
+        l2 = Math.abs((b.x - d.x)*cdy - (b.y - d.y)*cdx);
         // need to handle case where l1+l2 = 0
         // if this method could be called on parallel segments
         // that overlap
-        double t = l1 / (l1 + l2);
-        Point2d p = new Point2d(
+        if (l1 + l2 == 0) {
+            System.err.println(
+                    "Intersection called on parallel overlapping segments!");
+        }
+        t = l1 / (l1 + l2);
+        p = new Point2d(
                 (1 - t)*a.x + t*b.x,
                 (1 - t)*a.y + t*b.y);
         return p;
@@ -2192,7 +2259,7 @@ public class Mesh
                             name,i,j);
                 }
             }
-            for (int j=0; j<halfEdges.size(); j++)  {
+            /*for (int j=0; j<halfEdges.size(); j++)  {
                 HalfEdge he = halfEdges.get(j);
                 if (between(he.origin,he.next.origin,p1) &&
                     he.origin != p1 &&
@@ -2203,7 +2270,7 @@ public class Mesh
                     if (DEBUG) debugView(p1,"Point overlaps halfedge");
                     if (DEBUG) debugView(he,"Point overlaps halfedge");
                 }
-            }
+            }*/
         }
     }
 
@@ -2333,8 +2400,8 @@ public class Mesh
     public void debugView(String s)
     {
         if (toggleDebugVisual) {
-            // override the repaint queue by calling the paint method directly
-            debugFrame.paint(debugFrame.getGraphics());
+            //debugFrame.repaint();
+            debugPanel.repaint();
         }
         if (toggleDebugInteractive
             && !toggleDebugSuspend )
@@ -2391,10 +2458,12 @@ public class Mesh
         toggleDebugInteractive = toggleDebugVisual = false;
     }
     
-    public void debugPause()
+    public void debugPause(String s, Object ... args)
     {
         dvStart();
-        debugView();
+        for (Object obj : args) {
+            debugView(s,obj);
+        }
         dvEnd();
     }
     
@@ -2423,8 +2492,7 @@ public class Mesh
     protected final String error(String s, Object ... args)
     {
         if (DEBUG) {
-            dvStart();
-            debugView(s,args);
+            debugPause(s,args);
         }
         return error(s);
     }
