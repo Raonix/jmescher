@@ -32,8 +32,10 @@ import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.geom.GeneralPath;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedList;
+import java.util.List;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JOptionPane;
@@ -88,10 +90,11 @@ public class Mesh
             "Illegal polygonal region!";
     protected final static String E_HALFEDGE =
             "Mismatched halfedge!";
+    protected final static int NULL_VALUE = -100000;
 
     /* stdout/debug/test flags */
     public final static boolean MESSAGES = false;
-    public final static boolean DEBUG = true;
+    public final static boolean DEBUG = false;
     public final static boolean TEST = false;
 
     /* debug */
@@ -111,8 +114,10 @@ public class Mesh
     private final double incircleErrorBound;
     
     /* mesh data */
-    protected LinkedList<Point> points = new LinkedList();
-    protected LinkedList<HalfEdge> halfEdges = new LinkedList();
+    final protected List<Point> points =
+            (List)Collections.synchronizedList(new LinkedList());
+    final protected List<HalfEdge> halfEdges =
+            (List)Collections.synchronizedList(new LinkedList());
     protected int nBoundary;
     
     /* queues */
@@ -753,8 +758,8 @@ public class Mesh
         heAdd3 = addHalfEdge(p,he3.origin);
         // link halfedges
         heAdd1.next = he1;
-        //heAdd2.next = he2;
-        //heAdd3.next = he3;
+        heAdd2.next = he2;
+        heAdd3.next = he3;
         he.next.next = heAdd1.sibling;
         he1.next = heAdd2.sibling;
         he2.next = heAdd3.sibling;
@@ -1595,48 +1600,56 @@ public class Mesh
 
     public void drawPoints(Graphics2D g2)
     {
-        for (Point p : points) {
-            g2.setColor(p.getColor());
-            drawPoint(g2,p);
+        synchronized(points) {
+            for (Point p : points) {
+                g2.setColor(p.getColor());
+                drawPoint(g2,p);
+            }
         }
     }
     
     public void drawLines(Graphics2D g2)
     {
-        clearFlags(HalfEdge.FLAG_DRAW);
-        for (HalfEdge he : halfEdges) {
-            g2.setColor(he.getColor());
-            if (DRAW_HALFEDGES) drawHalfEdge(g2,he);
-            if (he.isFlagged(HalfEdge.FLAG_DRAW)) continue;
-            drawLine(g2,he);
-            he.flagEdge(HalfEdge.FLAG_DRAW);
+        synchronized(halfEdges) {
+            clearFlags(HalfEdge.FLAG_DRAW);
+            for (HalfEdge he : halfEdges) {
+                g2.setColor(he.getColor());
+                if (DRAW_HALFEDGES) drawHalfEdge(g2,he);
+                if (he.isFlagged(HalfEdge.FLAG_DRAW)) continue;
+                drawLine(g2,he);
+                he.flagEdge(HalfEdge.FLAG_DRAW);
+            }
         }
     }
     
     public void drawLinesGray(Graphics2D g2)
     {
-        clearFlags(HalfEdge.FLAG_DRAW);
-        g2.setColor(grayColor);
-        for (HalfEdge he : halfEdges) {
-            if (he.isFlagged(HalfEdge.FLAG_DRAW)) continue;
-            drawLine(g2,he.origin,he.next.origin);
-            he.flagEdge(HalfEdge.FLAG_DRAW);
+        synchronized(halfEdges) {
+            clearFlags(HalfEdge.FLAG_DRAW);
+            g2.setColor(grayColor);
+            for (HalfEdge he : halfEdges) {
+                if (he.isFlagged(HalfEdge.FLAG_DRAW)) continue;
+                drawLine(g2,he.origin,he.next.origin);
+                he.flagEdge(HalfEdge.FLAG_DRAW);
+            }
         }
     }
     
     public void drawBoundary(Graphics2D g2)
     {
-        g2.setColor(HalfEdge.COLORS[(HalfEdge.BOUNDARY)]);
-        for (HalfEdge he : halfEdges) {
-            if (he.isType(HalfEdge.BOUNDARY)) drawLine(g2,he);
+        synchronized(halfEdges) {
+            g2.setColor(HalfEdge.COLORS[(HalfEdge.BOUNDARY)]);
+            for (HalfEdge he : halfEdges) {
+                if (he.isType(HalfEdge.BOUNDARY)) drawLine(g2,he);
+            }
         }
     }
     
     protected void drawPoint(Graphics2D g2, Point2d p)
     {
         if (DRAW_PT_FULL) {
-        g2.fillOval((int)p.x - 3, (int)p.y - 3, 5, 5);
-        g2.drawOval((int)p.x - 6, (int)p.y - 5, 10, 10);
+            g2.fillOval((int)p.x - 3, (int)p.y - 3, 5, 5);
+            g2.drawOval((int)p.x - 6, (int)p.y - 5, 10, 10);
         } else {
             g2.fillOval((int)p.x, (int)p.y, 1, 1);
         }
@@ -2144,7 +2157,7 @@ public class Mesh
             System.err.println("Unable to complete exact incircle calculation!");
             System.err.println(e.getMessage());
         }
-        if (MESSAGES) message("incircleExact = %g\n", det.doubleValue());
+        if (MESSAGES) message("incircleExact = %g", det.doubleValue());
 
         return (double)det.compareTo(Apfloat.ZERO);
     }
@@ -2365,11 +2378,18 @@ public class Mesh
             if (i % 20 == 0) {
                 message("     ID | Halfedge |    Pair | Type");
             }
-            message("%7d |  %7d | %7d |    %1d",
-                        i,
-                        halfEdges.indexOf(p.he),
-                        points.indexOf(p.pair),
-                        p.type);
+            int ih, ip;
+            try {
+                ih = halfEdges.indexOf(p.he);
+            } catch (NullPointerException e) {
+                ih = NULL_VALUE;
+            }
+            try {
+                ip = halfEdges.indexOf(p.he);
+            } catch (NullPointerException e) {
+                ip = NULL_VALUE;
+            }
+            message("%7d |  %7d | %7d |    %1d", i, ih, ip, p.type);
         }
     }
 
@@ -2382,13 +2402,29 @@ public class Mesh
                 message("     ID ->    Next |  Origin ->    " +
                         "Next | Sibling | Type");
             }
+            int in, io, ino, is;
+            try {
+                in = halfEdges.indexOf(he.next);
+            } catch (NullPointerException e) {
+                in = NULL_VALUE;
+            }
+            try {
+                io = points.indexOf(he.origin);
+            } catch (NullPointerException e) {
+                io = NULL_VALUE;
+            }
+            try {
+                ino = points.indexOf(he.next.origin);
+            } catch (NullPointerException e) {
+                ino = NULL_VALUE;
+            }
+            try {
+                is = halfEdges.indexOf(he.sibling);
+            } catch (NullPointerException e) {
+                is = NULL_VALUE;
+            }
             message("%7d -> %7d | %7d -> %7d | %7d | %1d",
-                    i,
-                    halfEdges.indexOf(he.next),
-                    points.indexOf(he.origin),
-                    points.indexOf(he.next.origin),
-                    halfEdges.indexOf(he.sibling),
-                    he.type);
+                    i, in, io, ino, is, he.type);
         }
     }
     
